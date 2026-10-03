@@ -1,0 +1,221 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>WAV Player</title>
+<style>
+  :root {
+    color-scheme: dark;
+    --bg: #111;
+    --card: #1c1c1e;
+    --line: #2c2c2e;
+    --text: #f5f5f7;
+    --muted: #98989d;
+    --accent: #0a84ff;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font: 17px/1.35 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    padding: env(safe-area-inset-top) 16px calc(120px + env(safe-area-inset-bottom));
+  }
+  h1 { font-size: 28px; margin: 20px 0 4px; }
+  p.note { color: var(--muted); margin: 0 0 20px; font-size: 15px; }
+  label.upload {
+    display: block;
+    text-align: center;
+    background: var(--accent);
+    color: white;
+    font-weight: 600;
+    padding: 16px;
+    border-radius: 14px;
+    margin-bottom: 18px;
+  }
+  label.upload input { display: none; }
+  ul { list-style: none; margin: 0; padding: 0; }
+  li {
+    background: var(--card);
+    border-radius: 14px;
+    padding: 14px;
+    margin-bottom: 10px;
+    display: flex;
+    gap: 12px;
+    align-items: center;
+  }
+  li.active { outline: 2px solid var(--accent); }
+  .meta { flex: 1; min-width: 0; }
+  .name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .sub { color: var(--muted); font-size: 13px; margin-top: 2px; }
+  button {
+    border: 0;
+    border-radius: 10px;
+    padding: 10px 14px;
+    font: inherit;
+    font-weight: 600;
+    background: var(--line);
+    color: var(--text);
+  }
+  button.play { background: var(--accent); color: white; }
+  .empty { color: var(--muted); text-align: center; padding: 32px 8px; }
+  .dock {
+    position: fixed;
+    left: 0; right: 0; bottom: 0;
+    padding: 12px 16px calc(12px + env(safe-area-inset-bottom));
+    background: #000;
+    border-top: 1px solid var(--line);
+  }
+  audio { width: 100%; }
+</style>
+</head>
+<body>
+  <h1>WAV Player</h1>
+  <p class="note">Files stay on this phone, in this browser.</p>
+  <label class="upload">Add WAV files
+    <input id="picker" type="file" accept=".wav,audio/wav,audio/x-wav,audio/wave" multiple>
+  </label>
+  <ul id="list"></ul>
+  <p id="empty" class="empty">Nothing here yet.</p>
+  <div class="dock" hidden>
+    <audio id="player" controls playsinline></audio>
+  </div>
+<script>
+const DB = "wav-player";
+const STORE = "clips";
+const listEl = document.getElementById("list");
+const emptyEl = document.getElementById("empty");
+const player = document.getElementById("player");
+const dock = document.querySelector(".dock");
+let clips = [];
+let currentId = null;
+let currentUrl = null;
+
+function openDb() {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open(DB, 1);
+    req.onupgradeneeded = () => {
+      req.result.createObjectStore(STORE, { keyPath: "id" });
+    };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+function txDone(tx) {
+  return new Promise((resolve, reject) => {
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+    tx.onabort = () => reject(tx.error);
+  });
+}
+
+async function loadAll() {
+  const db = await openDb();
+  const tx = db.transaction(STORE, "readonly");
+  const req = tx.objectStore(STORE).getAll();
+  const rows = await new Promise((resolve, reject) => {
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+  clips = rows.sort((a, b) => b.added - a.added);
+  render();
+}
+
+function formatBytes(n) {
+  if (n < 1024) return n + " B";
+  if (n < 1048576) return (n / 1024).toFixed(0) + " KB";
+  return (n / 1048576).toFixed(1) + " MB";
+}
+
+function render() {
+  listEl.innerHTML = "";
+  emptyEl.hidden = clips.length > 0;
+  for (const clip of clips) {
+    const li = document.createElement("li");
+    if (clip.id === currentId) li.className = "active";
+    const meta = document.createElement("div");
+    meta.className = "meta";
+    const name = document.createElement("div");
+    name.className = "name";
+    name.textContent = clip.name;
+    const sub = document.createElement("div");
+    sub.className = "sub";
+    sub.textContent = formatBytes(clip.size);
+    meta.append(name, sub);
+    const play = document.createElement("button");
+    play.className = "play";
+    play.textContent = clip.id === currentId && !player.paused ? "Pause" : "Play";
+    play.addEventListener("click", () => toggle(clip));
+    const del = document.createElement("button");
+    del.textContent = "Delete";
+    del.addEventListener("click", () => remove(clip.id));
+    li.append(meta, play, del);
+    listEl.append(li);
+  }
+}
+
+async function toggle(clip) {
+  if (currentId === clip.id) {
+    if (player.paused) player.play();
+    else player.pause();
+    render();
+    return;
+  }
+  if (currentUrl) URL.revokeObjectURL(currentUrl);
+  currentUrl = URL.createObjectURL(clip.blob);
+  currentId = clip.id;
+  player.src = currentUrl;
+  dock.hidden = false;
+  try { await player.play(); } catch (err) { console.error(err); }
+  render();
+}
+
+async function remove(id) {
+  const db = await openDb();
+  const tx = db.transaction(STORE, "readwrite");
+  tx.objectStore(STORE).delete(id);
+  await txDone(tx);
+  if (currentId === id) {
+    player.pause();
+    player.removeAttribute("src");
+    if (currentUrl) URL.revokeObjectURL(currentUrl);
+    currentUrl = null;
+    currentId = null;
+    dock.hidden = true;
+  }
+  await loadAll();
+}
+
+document.getElementById("picker").addEventListener("change", async (event) => {
+  const files = [...event.target.files];
+  event.target.value = "";
+  if (!files.length) return;
+  const db = await openDb();
+  const tx = db.transaction(STORE, "readwrite");
+  const store = tx.objectStore(STORE);
+  for (const file of files) {
+    store.put({
+      id: crypto.randomUUID(),
+      name: file.name,
+      size: file.size,
+      blob: file,
+      added: Date.now()
+    });
+  }
+  await txDone(tx);
+  await loadAll();
+});
+
+player.addEventListener("play", render);
+player.addEventListener("pause", render);
+player.addEventListener("ended", render);
+
+loadAll().catch((err) => {
+  emptyEl.textContent = "Could not open storage: " + err.message;
+});
+</script>
+</body>
+</html>
